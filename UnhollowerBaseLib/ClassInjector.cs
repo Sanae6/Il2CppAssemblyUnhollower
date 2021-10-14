@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -13,6 +14,7 @@ using UnhollowerBaseLib.Runtime;
 using UnhollowerBaseLib.Runtime.VersionSpecific.Assembly;
 using UnhollowerBaseLib.Runtime.VersionSpecific.Class;
 using UnhollowerBaseLib.Runtime.VersionSpecific.Image;
+using UnhollowerBaseLib.Runtime.VersionSpecific.Type;
 using UnhollowerRuntimeLib.XrefScans;
 using Void = Il2CppSystem.Void;
 
@@ -327,10 +329,54 @@ namespace UnhollowerRuntimeLib
                 classPointer.TypeHierarchy[i] = baseClassPointer.TypeHierarchy[i];
             classPointer.TypeHierarchy[TypeHierarchyDepth - 1] = classPointer.ClassPointer;
 
+            if (true)
+            {
+                var eligibleProperties = type.GetProperties(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
+                    .Where(IsFieldPropertyEligible)
+                    .ToArray();
+                var propertyCount = classPointer.FieldCount = (ushort)eligibleProperties.Length;
+                var fieldPointerArray = (Il2CppFieldInfo*)Marshal.AllocHGlobal((int)(UnityVersionHandler.FieldSize() * propertyCount));
+                classPointer.Fields = fieldPointerArray;
+
+                var fieldOffset = classPointer.InstanceSize - IntPtr.Size;
+                for (int i = 0; i < propertyCount; i++)
+                {
+                    var fieldPointer = UnityVersionHandler.Wrap(&(fieldPointerArray[i]));
+                    var property = eligibleProperties[i];
+                    fieldPointer.Name = Marshal.StringToHGlobalAnsi(property.Name);
+                    fieldPointer.Parent = classPointer.ClassPointer;
+                    var fieldClass = ReadClassPointerForType(property.PropertyType);
+                    fieldPointer.Type = (Il2CppTypeStruct*) IL2CPP.il2cpp_class_get_type(fieldClass);
+                    var fieldType = UnityVersionHandler.Wrap(fieldPointer.Type);
+                    fieldPointer.Offset = (int) fieldOffset;
+                    if (fieldClass == IntPtr.Zero || !IL2CPP.il2cpp_class_is_valuetype(fieldClass))
+                    {
+                        LogSupport.Info($"Field property {property.Name} at {fieldPointer.Offset} is a reference type {fieldType.ByRef} or class is null {fieldClass == IntPtr.Zero}");
+                        if (fieldClass == IntPtr.Zero)
+                        {
+                            fieldType = UnityVersionHandler.NewType();
+                            fieldType.Type = Il2CppTypeEnum.IL2CPP_TYPE_OBJECT;
+                            fieldType.Data = IntPtr.Zero;
+                            LogSupport.Info("bad");
+                        }
+                        fieldOffset += (uint) IntPtr.Size;
+                    }
+                    else
+                    {
+                        uint _align = 0;
+                        var fieldSize = (uint) IL2CPP.il2cpp_class_value_size(ReadClassPointerForType(property.PropertyType), ref _align);
+                        LogSupport.Info($"Field property {property.Name} at {fieldPointer.Offset} is a value type with size {fieldSize} at offset {fieldOffset}!");
+                        fieldOffset += fieldSize;
+                    }
+                }
+                classPointer.ActualSize = classPointer.InstanceSize = (uint) (fieldOffset + IntPtr.Size);
+                LogSupport.Error($"Final size is {classPointer.InstanceSize}");
+            }
+
             var newCounter = Interlocked.Decrement(ref ourClassOverrideCounter);
             FakeTokenClasses[newCounter] = classPointer.Pointer;
             classPointer.ByValArg.Data = classPointer.ThisArg.Data = (IntPtr)newCounter;
-
+                
             RuntimeSpecificsStore.SetClassInfo(classPointer.Pointer, true, true);
             WriteClassPointerForType(type, classPointer.Pointer);
 
@@ -375,6 +421,13 @@ namespace UnhollowerRuntimeLib
 
             return typeof(Il2CppObjectBase).IsAssignableFrom(type);
         }
+        
+        private static bool IsFieldPropertyEligible(PropertyInfo property) {
+            if (property.GetMethod.IsStatic) return false;
+            if (property.CustomAttributes.All(attribute => attribute.AttributeType != typeof(FieldAttribute))) return false;
+
+            return IsTypeSupported(property.PropertyType);
+        }
 
         private static bool IsMethodEligible(MethodInfo method)
         {
@@ -382,6 +435,16 @@ namespace UnhollowerRuntimeLib
             if (method.IsStatic || method.IsAbstract) return false;
             if (method.CustomAttributes.Any(it => it.AttributeType == typeof(HideFromIl2CppAttribute))) return false;
 
+            if (
+                method.DeclaringType != null &&
+                method.DeclaringType.GetProperties()
+                    .Where(property => property.GetAccessors(true).Contains(method))
+                    .Any(property => property.CustomAttributes.Any(it => it.AttributeType == typeof(HideFromIl2CppAttribute) || it.AttributeType == typeof(SerializableAttribute)))
+            )
+            {
+                return false;
+            }
+            
             if (method.DeclaringType != null)
             {
                 if (method.DeclaringType.GetProperties()

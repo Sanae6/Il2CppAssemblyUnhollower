@@ -171,6 +171,9 @@ namespace UnhollowerBaseLib.Runtime
         public static unsafe INativeFieldInfoStruct Wrap(Il2CppFieldInfo* fieldInfoPointer) =>
             fieldInfoStructHandler.Wrap(fieldInfoPointer);
 
+        public static unsafe uint FieldSize() =>
+            fieldInfoStructHandler.Size();
+
 
         //Images
         public static INativeImageStruct NewImage() =>
